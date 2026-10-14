@@ -1,4 +1,5 @@
 import AppKit
+import OSLog
 import SwiftUI
 import KinesisCore
 
@@ -102,6 +103,7 @@ final class ShortcutCapture: ObservableObject {
     private var keysDown: Set<UInt16> = []
     /// Only one recorder listens at a time.
     fileprivate static weak var active: ShortcutCapture?
+    private static let log = Logger(subsystem: "local.callbacked.kinesis", category: "shortcuts")
 
     func start(_ done: @escaping (Outcome) -> Void) {
         Self.active?.cancel()
@@ -135,8 +137,16 @@ final class ShortcutCapture: ObservableObject {
         let mask = (CGEventMask(1) << CGEventType.keyDown.rawValue)
             | (CGEventMask(1) << CGEventType.keyUp.rawValue)
             | (CGEventMask(1) << CGEventType.flagsChanged.rawValue)
-        guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
-                                          eventsOfInterest: mask, callback: recorderTapCallback, userInfo: nil) else { return }
+        // The hardware-event level first. Shortcuts other apps own, such as ⌥Space, are taken
+        // away before the session level ever sees them; this level sees them first.
+        guard let tap = CGEvent.tapCreate(tap: .cghidEventTap, place: .headInsertEventTap, options: .defaultTap,
+                                          eventsOfInterest: mask, callback: recorderTapCallback, userInfo: nil)
+                ?? CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
+                                     eventsOfInterest: mask, callback: recorderTapCallback, userInfo: nil) else {
+            Self.log.notice("Shortcut recorder: no event tap, listening to Kinesis's own window only")
+            return
+        }
+        Self.log.notice("Shortcut recorder: listening through an event tap")
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
@@ -168,6 +178,7 @@ final class ShortcutCapture: ObservableObject {
     /// Returns true when the key event belonged to the recording, so no one else gets it.
     fileprivate func handle(_ press: KeyPress) -> Bool {
         guard recording else { return false }
+        Self.log.debug("Shortcut recorder saw key \(press.keyCode, privacy: .public) \(String(describing: press.kind), privacy: .public) modifiers \(press.modifiers.rawValue, privacy: .public)")
         // Keys Kinesis posts for a gesture are not the person typing.
         guard !press.fromKinesis else { return false }
         switch press.kind {
