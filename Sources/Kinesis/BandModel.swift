@@ -81,11 +81,23 @@ final class BandModel: ObservableObject {
     private var switchWait: Task<Void, Never>?
     /// Turns handwriting on or off, for a gesture bound to it. Dev builds set it.
     var onToggleHandwriting: (() -> Void)?
-    @Published var tapMappings: [TapGesture: MacAction] = [.indexTap: .none, .indexDoubleTap: .playPause, .middleTap: .none, .middleDoubleTap: .mute, .middleHold: .none] {
+    @Published var tapMappings: [TapGesture: MacAction] = [.indexTap: .none, .indexDoubleTap: .playPause, .middleTap: .none, .middleDoubleTap: .mute, .middleHold: .none, .middleHoldRelease: .none] {
         didSet {
             defaults.set(Dictionary(uniqueKeysWithValues: tapMappings.map { ($0.key.rawValue, $0.value.rawValue) }), forKey: "tapMappings")
+            // A held shortcut must not outlive the setting that holds it.
+            if tapMappings[.middleHold] != .holdShortcut { releaseHeldShortcut() }
         }
     }
+    /// The shortcuts you recorded, by gesture. A gesture whose action is a recorded
+    /// shortcut looks its keys up here, so changing the action keeps them for later.
+    @Published var recordedShortcuts: [String: KeyShortcut] = [:] {
+        didSet {
+            if let data = try? JSONEncoder().encode(recordedShortcuts) { defaults.set(data, forKey: "recordedShortcuts") }
+            if let held = heldShortcut, recordedShortcuts[Self.shortcutKey(.tap(.middleHold))] != held.shortcut { releaseHeldShortcut() }
+        }
+    }
+    /// The shortcut a middle hold is holding down, until the pinch lets go.
+    private var heldShortcut: (shortcut: KeyShortcut, finger: String)?
     @Published var dialTarget = DialTarget.volume {
         didSet { defaults.set(dialTarget.rawValue, forKey: "dialTarget"); resetDial() }
     }
@@ -516,6 +528,10 @@ final class BandModel: ObservableObject {
                 if let tap = TapGesture(rawValue: key), let action = MacAction(rawValue: value) { tapMappings[tap] = action }
             }
         }
+        if let data = defaults.data(forKey: "recordedShortcuts"),
+           let saved = try? JSONDecoder().decode([String: KeyShortcut].self, from: data) {
+            recordedShortcuts = saved
+        }
         if let saved = defaults.string(forKey: "dialTarget"), let target = DialTarget(rawValue: saved) { dialTarget = target }
         let sensitivity = defaults.double(forKey: "dialSensitivity")
         if (0.5...4).contains(sensitivity) { dialSensitivity = sensitivity }
@@ -790,6 +806,8 @@ final class BandModel: ObservableObject {
 
     func setAirCursorEnabled(_ enabled: Bool) {
         if !enabled { cancelPointerCalibration(); releaseHeldButton() }
+        // The cursor takes the fingers' pinches, so a held shortcut would never hear its release.
+        if enabled { releaseHeldShortcut() }
         guard !enabled || (canUseAirCursor && pointerCalibration == nil) else { return }
         guard enabled != airCursorEnabled else { return }
         airCursorEnabled = enabled
@@ -942,6 +960,7 @@ final class BandModel: ObservableObject {
     }
 
     private func suspendActions() {
+        releaseHeldShortcut()
         setAirCursorEnabled(false)
         gate.pause()
         resetDial()
@@ -1288,6 +1307,8 @@ final class BandModel: ObservableObject {
         case .dataSeen:
             markDataArrived(at: event.receivedAt)
         case .gesture(let message):
+            // Any release of the finger holding a shortcut lets go, even one too late to act on.
+            if message.isRelease, !message.synthetic, heldShortcut?.finger == message.finger { releaseHeldShortcut() }
             guard wantsConnection, !sleeping, now - message.receivedAt <= 0.35, now - message.receivedAt >= -0.1 else { return }
             markDataArrived(at: message.receivedAt)
             receivedInput()
@@ -1296,6 +1317,7 @@ final class BandModel: ObservableObject {
             // motion around them. A pinch from seconds ago must not click now.
             if linkIsLate(at: now) {
                 if heldButton?.finger == message.finger { releaseHeldButton() }
+                if heldShortcut?.finger == message.finger { releaseHeldShortcut() }
                 // Forget this finger's pinch too: a dropped release would otherwise swallow the next press.
                 cursorPressedFingers.remove(message.finger)
                 if pinchedFinger == message.finger { pinchedFinger = nil }
@@ -1313,6 +1335,11 @@ final class BandModel: ObservableObject {
                     if !holdForCursorSwitch(message, now: now) { receiveCursorGesture(message, now: now) }
                     return
                 }
+            }
+            // A fresh pinch means the last one ended, even if its release never arrived.
+            if !message.synthetic, heldShortcut?.finger == message.finger,
+               message.derivedAction == "buttonPress" || (message.action == "press" && message.derivedAction == "unknown") {
+                releaseHeldShortcut()
             }
             if !message.synthetic, ["index", "middle"].contains(message.finger) {
                 let finger = message.finger
@@ -1356,11 +1383,25 @@ final class BandModel: ObservableObject {
             gestureCount += 1
             totalGestureCount += 1
             defaults.set(totalGestureCount, forKey: "totalGestureCount")
+            if case .tap(.middleHoldRelease) = gesture {
+                // Letting go of a held shortcut always goes through, paused or not.
+                if heldShortcut != nil {
+                    releaseHeldShortcut()
+                    return
+                }
+                // A release follows its hold closely, so it skips the gate's spacing.
+                guard controlsEnabled, action != .none, tapMappings[.middleHold] != .holdShortcut,
+                      gate.allowsRelease(eventTime: message.receivedAt, now: now, live: live, trusted: controls.trusted) else {
+                    return
+                }
+                dispatch(action, for: gesture)
+                return
+            }
             guard controlsEnabled, action != .none,
                   gate.allows(eventTime: message.receivedAt, now: now, live: live, trusted: controls.trusted) else {
                 return
             }
-            dispatch(action)
+            dispatch(action, for: gesture)
         case .dialState(let engaged):
             guard !airCursorEnabled, pointerCalibration == nil else { return }
             guard live, pendingHand == nil, abs(now - event.receivedAt) <= 0.35, !linkIsLate(at: now) else { resetDial(); return }
@@ -1626,6 +1667,7 @@ final class BandModel: ObservableObject {
                 if !linkCongested {
                     linkCongested = true
                     releaseHeldButton()
+                    releaseHeldShortcut()
                     connectionLog.notice("Band data is arriving \(delay, privacy: .public)s late; the radio link is congested")
                 }
                 // Turning the motion streams off and on may clear the band's backlog. It has
@@ -1698,6 +1740,8 @@ final class BandModel: ObservableObject {
     /// Shows the three targets. Pinches aim at them instead of clicking until it ends.
     func beginPointerCalibration() {
         guard canUseAirCursor else { return }
+        // Calibration takes the pinches, so a held shortcut would never hear its release.
+        releaseHeldShortcut()
         setAirCursorEnabled(false)
         pointerCalibrationProblem = nil
         calibrationPinchDown = pinchedFinger != nil
@@ -1888,6 +1932,67 @@ final class BandModel: ObservableObject {
                 enrollmentStage = .failed(error.localizedDescription)
                 connection.stop()
             }
+        }
+    }
+
+    /// Where a gesture's recorded shortcut is saved.
+    static func shortcutKey(_ gesture: RecognizedGesture) -> String {
+        switch gesture {
+        case .swipe(let direction): "swipe." + direction.rawValue
+        case .tap(let tap): "tap." + tap.rawValue
+        }
+    }
+
+    /// The shortcut recorded for a gesture, if any.
+    func recordedShortcut(for gesture: RecognizedGesture) -> KeyShortcut? {
+        recordedShortcuts[Self.shortcutKey(gesture)]
+    }
+
+    func setRecordedShortcut(_ shortcut: KeyShortcut?, for gesture: RecognizedGesture) {
+        recordedShortcuts[Self.shortcutKey(gesture)] = shortcut
+    }
+
+    /// An action as the app lists it, in lowercase: a recorded shortcut shows its keys as typed.
+    func label(of action: MacAction, for gesture: RecognizedGesture) -> String {
+        guard action.usesRecordedShortcut else { return action.title.lowercased() }
+        guard let shortcut = recordedShortcut(for: gesture) else { return "no shortcut recorded" }
+        return action == .holdShortcut ? "hold " + shortcut.display : shortcut.display
+    }
+
+    /// Lets go of a shortcut a hold is holding. Never leaves one stuck down: this runs when
+    /// the hold ends, when controls pause or the band drops, and when the link falls behind.
+    private func releaseHeldShortcut() {
+        guard let held = heldShortcut else { return }
+        heldShortcut = nil
+        do {
+            try controls.press(held.shortcut, down: false)
+            lastAction = "Released: \(held.shortcut.display)"
+        } catch { self.error = error.localizedDescription }
+    }
+
+    private func dispatch(_ action: MacAction, for gesture: RecognizedGesture) {
+        guard action.usesRecordedShortcut else {
+            dispatch(action)
+            return
+        }
+        guard let shortcut = recordedShortcut(for: gesture) else {
+            lastAction = "No shortcut recorded for \(gesture.label.lowercased())"
+            return
+        }
+        do {
+            if action == .holdShortcut, case .tap(let tap) = gesture, tap.action == "hold" {
+                releaseHeldShortcut()
+                try controls.press(shortcut, down: true)
+                heldShortcut = (shortcut, tap.finger)
+                lastAction = "Holding: \(shortcut.display)"
+            } else {
+                try controls.press(shortcut, down: true)
+                try controls.press(shortcut, down: false)
+                lastAction = "Sent: \(shortcut.display)"
+            }
+        } catch {
+            self.error = error.localizedDescription
+            pause()
         }
     }
 

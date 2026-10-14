@@ -78,6 +78,11 @@ public struct BandGesture: Sendable {
         self.receivedAt = receivedAt
     }
 
+    /// The pinch was let go, after a tap or a hold.
+    public var isRelease: Bool {
+        action == "release" || derivedAction == "buttonRelease" || derivedAction == "buttonHoldRelease"
+    }
+
     public var gestureLabel: String? {
         guard !synthetic else { return nil }
         let names = ["singleTap": "tap", "doubleTap": "double tap", "buttonHold": "hold",
@@ -101,14 +106,31 @@ public enum SwipeDirection: String, CaseIterable, Codable, Identifiable, Sendabl
 public struct GestureRouter: Sendable {
     private var seen: [String] = []
     private var last: [RecognizedGesture: (source: String, time: Double)] = [:]
+    /// Fingers whose hold was recognized and has not been let go yet.
+    private var holding: Set<String> = []
 
     public init() {}
 
-    public mutating func reset() { seen.removeAll(); last.removeAll() }
+    public mutating func reset() { seen.removeAll(); last.removeAll(); holding.removeAll() }
 
     public mutating func gesture(from message: BandGesture, now: Double) -> RecognizedGesture? {
         guard !message.synthetic,
               now - message.receivedAt >= -0.1, now - message.receivedAt <= 0.35 else { return nil }
+        // A new pinch means any earlier hold ended, even if its release was dropped
+        // before it got here. Otherwise a later tap's release would end a stale hold.
+        if !message.isRelease, message.derivedAction != "buttonHold",
+           message.action == "press" || message.derivedAction == "buttonPress" {
+            holding.remove(message.finger)
+        }
+        // The end of a hold is its own gesture. The band can report one release twice, as a
+        // raw release and a derived one: the first ends the hold and the second finds none.
+        if message.isRelease, holding.contains(message.finger),
+           !["singleTap", "doubleTap", "buttonHold"].contains(message.derivedAction) {
+            holding.remove(message.finger)
+            guard let release = TapGesture.allCases.first(where: { $0.finger == message.finger && $0.action == "holdrelease" })
+            else { return nil }
+            return .tap(release)
+        }
         let derived: [String: SwipeDirection] = ["buttonLeft": .left, "buttonRight": .right,
                                                 "buttonUp": .up, "buttonDown": .down]
         let gesture: RecognizedGesture
@@ -133,6 +155,7 @@ public struct GestureRouter: Sendable {
             return nil
         }
         last[gesture] = (source, message.receivedAt)
+        if case .tap(let tap) = gesture, tap.action == "hold" { holding.insert(message.finger) }
         return gesture
     }
 }
@@ -149,7 +172,8 @@ public enum RecognizedGesture: Hashable, Sendable {
 
 public enum TapGesture: String, CaseIterable, Identifiable, Sendable {
     // An index hold is the dial, so only the middle finger has a hold of its own.
-    case indexTap, indexDoubleTap, middleTap, middleDoubleTap, middleHold
+    // Its release, after a hold, can have an action too.
+    case indexTap, indexDoubleTap, middleTap, middleDoubleTap, middleHold, middleHoldRelease
     public var id: String { rawValue }
     public var finger: String { self == .indexTap || self == .indexDoubleTap ? "index" : "middle" }
     public var action: String {
@@ -157,10 +181,17 @@ public enum TapGesture: String, CaseIterable, Identifiable, Sendable {
         case .indexTap, .middleTap: "tap"
         case .indexDoubleTap, .middleDoubleTap: "doubletap"
         case .middleHold: "hold"
+        case .middleHoldRelease: "holdrelease"
         }
     }
-    /// The motion in plain words: tap, double tap, or hold.
-    public var motion: String { action == "doubletap" ? "double tap" : action }
+    /// The motion in plain words: tap, double tap, hold, or hold release.
+    public var motion: String {
+        switch action {
+        case "doubletap": "double tap"
+        case "holdrelease": "hold release"
+        default: action
+        }
+    }
     public var label: String { "\(finger.capitalized) \(motion)" }
 }
 
@@ -207,11 +238,18 @@ public struct DialRouter: Sendable {
 public enum MacAction: String, CaseIterable, Codable, Identifiable, Sendable {
     case none, previousDesktop, nextDesktop, missionControl, dismiss, previousWindow, nextWindow, previousTab, nextTab
     case playPause, mute, volumeUp, volumeDown, brightnessUp, brightnessDown
+    /// A shortcut you record for this gesture. The keys live with the gesture, not here.
+    case keyboardShortcut
+    /// A recorded shortcut held down from the start of a hold until its release,
+    /// like a push-to-talk key. Only a hold can do this.
+    case holdShortcut
     /// Kinesis's own switches, offered in developer mode. They send no shortcut.
     case toggleAirCursor, toggleHandwriting
     public var id: String { rawValue }
     /// Handled by Kinesis itself, not posted to the Mac.
     public var isKinesisSwitch: Bool { self == .toggleAirCursor || self == .toggleHandwriting }
+    /// Sends keys you recorded, so the gesture needs a shortcut saved with it.
+    public var usesRecordedShortcut: Bool { self == .keyboardShortcut || self == .holdShortcut }
     public var title: String {
         switch self {
         case .none: "No action"
@@ -229,6 +267,8 @@ public enum MacAction: String, CaseIterable, Codable, Identifiable, Sendable {
         case .volumeDown: "Volume down"
         case .brightnessUp: "Brightness up"
         case .brightnessDown: "Brightness down"
+        case .keyboardShortcut: "Keyboard shortcut…"
+        case .holdShortcut: "Hold a shortcut while pinching…"
         case .toggleAirCursor: "Air cursor on / off"
         case .toggleHandwriting: "Handwriting on / off"
         }
@@ -248,13 +288,13 @@ public enum MacAction: String, CaseIterable, Codable, Identifiable, Sendable {
         case .mute: "mute"
         case .volumeUp, .brightnessUp: "+"
         case .volumeDown, .brightnessDown: "−"
-        case .toggleAirCursor, .toggleHandwriting: "—"
+        case .keyboardShortcut, .holdShortcut, .toggleAirCursor, .toggleHandwriting: "—"
         }
     }
     public var keyCode: UInt16? {
         switch self {
         case .none, .playPause, .mute, .volumeUp, .volumeDown, .brightnessUp, .brightnessDown,
-             .toggleAirCursor, .toggleHandwriting: nil
+             .keyboardShortcut, .holdShortcut, .toggleAirCursor, .toggleHandwriting: nil
         case .previousDesktop: 123
         case .nextDesktop: 124
         case .missionControl: 126
@@ -278,6 +318,13 @@ public struct ActionGate: Sendable {
     public mutating func allows(eventTime: Double, now: Double, live: Bool, trusted: Bool) -> Bool {
         guard live, trusted, eventTime >= armedAt, now - eventTime <= 0.35,
               now - eventTime >= -0.1, now - lastAction >= minimumInterval else { return false }
+        lastAction = now
+        return true
+    }
+    /// The end of a gesture that already passed the gate, such as a hold's release.
+    /// It skips the minimum interval: a quick release after a hold must still count.
+    public mutating func allowsRelease(eventTime: Double, now: Double, live: Bool, trusted: Bool) -> Bool {
+        guard live, trusted, eventTime >= armedAt, now - eventTime <= 0.35, now - eventTime >= -0.1 else { return false }
         lastAction = now
         return true
     }

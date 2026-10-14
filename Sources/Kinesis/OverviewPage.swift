@@ -91,12 +91,14 @@ private struct GestureCaption: View {
         if model.dialEngaged {
             return model.dialTarget == .none ? "unassigned" : model.dialTarget.title.lowercased()
         }
-        switch model.recognizedGesture {
+        guard let gesture = model.recognizedGesture else { return nil }
+        switch gesture {
         case .swipe(let direction): mapped = model.mappings[direction]
         case .tap(let tap): mapped = model.tapMappings[tap]
-        case nil: return nil
         }
-        return (mapped ?? MacAction.none) == .none ? "unassigned" : mapped?.title.lowercased()
+        let bound = mapped ?? MacAction.none
+        if case .tap(.middleHoldRelease) = gesture, model.tapMappings[.middleHold] == .holdShortcut { return "let go of the shortcut" }
+        return bound == .none ? "unassigned" : model.label(of: bound, for: gesture)
     }
 
     var body: some View {
@@ -144,15 +146,17 @@ private struct GestureMap: View {
             let action = model.mappings[direction] ?? .none
             guard action != .none else { continue }
             rows.append(Entry(id: direction.rawValue, symbol: direction.symbol, gesture: direction.label.lowercased(),
-                              action: action.title.lowercased(), fired: .swipe(direction)))
+                              action: model.label(of: action, for: .swipe(direction)), fired: .swipe(direction)))
         }
         for tap in TapGesture.allCases {
             let action = model.tapMappings[tap] ?? .none
             // A hold is deliberate, so it has a row even before it has an action. Single
             // taps happen by accident, so they stay out until you give them one.
             guard action != .none || tap == .middleHold else { continue }
+            // While the hold holds a shortcut, its release only lets go.
+            if tap == .middleHoldRelease && model.tapMappings[.middleHold] == .holdShortcut { continue }
             rows.append(Entry(id: tap.rawValue, symbol: tap.symbol, gesture: tap.label.lowercased(),
-                              action: action == .none ? "unassigned" : action.title.lowercased(),
+                              action: action == .none ? "unassigned" : model.label(of: action, for: .tap(tap)),
                               assigned: action != .none, fired: .tap(tap)))
         }
         if model.dialTarget != .none {

@@ -255,6 +255,7 @@ struct SplitMix {
     var cursorLocation: CGPoint? { location }
     func requestAccess() {}
     func post(_ action: MacAction) throws {}
+    func press(_ shortcut: KeyShortcut, down: Bool) throws {}
     func moveCursor(to point: CGPoint, dragging button: CGMouseButton?) throws -> CGPoint {
         let clamped = CGPoint(x: max(0, min(displaySize.width - 1, point.x)), y: max(0, min(displaySize.height - 1, point.y)))
         if !inFrame { offFrameMoves.append((clock(), location, clamped)) }

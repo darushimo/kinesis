@@ -31,6 +31,7 @@ private struct AllowedControls: MacControls {
     var trusted = true
     func requestAccess() {}
     func post(_ action: MacAction) throws {}
+    func press(_ shortcut: KeyShortcut, down: Bool) throws {}
     var cursorLocation: CGPoint? { .zero }
     var displaySize: CGSize { CGSize(width: 1600, height: 1000) }
     func moveCursor(to point: CGPoint, dragging button: CGMouseButton?) throws -> CGPoint { point }

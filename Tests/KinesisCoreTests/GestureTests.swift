@@ -148,3 +148,44 @@ private func gesture(_ sequence: Int, time: Double = 100, action: String = "left
     #expect(TapGesture.middleHold.label == "Middle hold" && TapGesture.middleHold.finger == "middle")
     #expect(TapGesture.indexDoubleTap.motion == "double tap" && TapGesture.middleTap.motion == "tap")
 }
+
+@Test func aHoldEndsWithItsOwnReleaseOnce() {
+    var router = GestureRouter()
+    func message(_ sequence: UInt64, action: String, derived: String, finger: String = "middle") -> BandGesture {
+        BandGesture(sequence: sequence, timestampUs: sequence, finger: finger, action: action,
+                    derivedAction: derived, synthetic: false, receivedAt: 100)
+    }
+    // A release with no hold before it is not a gesture.
+    #expect(router.gesture(from: message(1, action: "release", derived: "buttonRelease"), now: 100) == nil)
+    #expect(router.gesture(from: message(2, action: "press", derived: "buttonHold"), now: 100) == .tap(.middleHold))
+    #expect(router.gesture(from: message(3, action: "release", derived: "buttonHoldRelease"), now: 100) == .tap(.middleHoldRelease))
+    // The same release reported again ends nothing.
+    #expect(router.gesture(from: message(4, action: "release", derived: "unknown"), now: 100) == nil)
+    // An index hold is the dial, and has no release of its own.
+    #expect(router.gesture(from: message(5, action: "press", derived: "buttonHold", finger: "index"), now: 100) == nil)
+    #expect(router.gesture(from: message(6, action: "release", derived: "buttonHoldRelease", finger: "index"), now: 100) == nil)
+    #expect(TapGesture.middleHoldRelease.label == "Middle hold release")
+}
+
+@Test func recordedShortcutsReadLikeMacMenus() throws {
+    let combo = KeyShortcut(keyCode: 40, modifiers: [.command, .control, .option], key: "K")
+    #expect(combo.display == "⌃⌥⌘K")
+    #expect(!combo.isModifierOnly && combo.heldModifiers == combo.modifiers)
+    let rightOption = KeyShortcut(keyCode: 61, modifiers: [.option], key: "right ⌥")
+    #expect(rightOption.isModifierOnly && rightOption.heldModifiers.isEmpty && rightOption.display == "right ⌥")
+    let decoded = try JSONDecoder().decode(KeyShortcut.self, from: JSONEncoder().encode(combo))
+    #expect(decoded == combo)
+    #expect(MacAction.holdShortcut.usesRecordedShortcut && !MacAction.mute.usesRecordedShortcut)
+}
+
+@Test func aNewPinchForgetsAHoldWhoseReleaseWasLost() {
+    var router = GestureRouter()
+    func message(_ sequence: UInt64, action: String, derived: String) -> BandGesture {
+        BandGesture(sequence: sequence, timestampUs: sequence, finger: "middle", action: action,
+                    derivedAction: derived, synthetic: false, receivedAt: 100)
+    }
+    #expect(router.gesture(from: message(1, action: "press", derived: "buttonHold"), now: 100) == .tap(.middleHold))
+    // The hold's release never arrived. A plain tap follows: its release is not a hold release.
+    #expect(router.gesture(from: message(2, action: "press", derived: "buttonPress"), now: 100) == nil)
+    #expect(router.gesture(from: message(3, action: "release", derived: "buttonRelease"), now: 100) == nil)
+}

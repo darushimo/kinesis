@@ -453,11 +453,12 @@ struct ElectrodeRing: View, Animatable {
 }
 
 extension KinesisCore.TapGesture {
-    /// One ring for a tap, two for a double tap, a filled one for a hold.
+    /// One ring for a tap, two for a double tap, a filled one for a hold, a dashed one for its release.
     var symbol: String {
         switch action {
         case "tap": "circle"
         case "doubletap": "circle.circle"
+        case "holdrelease": "circle.dashed"
         default: "circle.inset.filled"
         }
     }

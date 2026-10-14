@@ -274,6 +274,12 @@ import KinesisCore
         if let failure { throw failure }
         actions.append(action)
     }
+    /// Recorded shortcuts pressed and let go, in order.
+    private(set) var shortcutEvents: [(shortcut: KeyShortcut, down: Bool)] = []
+    func press(_ shortcut: KeyShortcut, down: Bool) throws {
+        if let failure { throw failure }
+        shortcutEvents.append((shortcut, down))
+    }
 }
 
 @MainActor private final class TestClock { var now = 100.0 }
@@ -2116,4 +2122,75 @@ private struct FakePairClient: BandPairClient {
     try await Task.sleep(for: .milliseconds(500))
     #expect(rig.controls.clicks.count == 2)
     #expect(rig.controls.buttonEvents.filter(\.down).count == rig.controls.buttonEvents.filter { !$0.down }.count)
+}
+
+@Test @MainActor func aHoldCanHoldAShortcutDownUntilItsRelease() async throws {
+    let defaults = MemoryDefaults()
+    defaults.set(true, forKey: "setupCompleted")
+    let connection = RecordedConnection()
+    let controls = RecordingControls()
+    var now = 100.0
+    let model = BandModel(defaults: defaults, connection: connection, controls: controls, clock: { now })
+    model.selectedAddress = "test-band"
+    let talk = KeyShortcut(keyCode: 61, modifiers: [.option], key: "right ⌥")
+    model.tapMappings[.middleHold] = .holdShortcut
+    model.setRecordedShortcut(talk, for: .tap(.middleHold))
+    model.connect()
+    connection.send(.connected)
+    connection.send(.heartbeat)
+    connection.send(.handedness(.right))
+    model.toggleControls()
+    func send(_ sequence: UInt64, _ action: String, _ derived: String) {
+        connection.send(.gesture(BandGesture(sequence: sequence, timestampUs: sequence, finger: "middle", action: action,
+                                             derivedAction: derived, synthetic: false, receivedAt: now)), at: now)
+    }
+    now = 101
+    send(1, "press", "buttonPress")
+    now = 101.5
+    send(2, "press", "buttonHold")
+    #expect(controls.shortcutEvents.map(\.down) == [true])
+    // Released quickly: the key still comes up, though it is soon after the hold.
+    now = 101.6
+    send(3, "release", "buttonHoldRelease")
+    #expect(controls.shortcutEvents.map(\.down) == [true, false])
+    #expect(controls.shortcutEvents.allSatisfy { $0.shortcut == talk })
+
+    // Pausing mid-hold lets go, so a key is never left down.
+    now = 103
+    send(4, "press", "buttonHold")
+    #expect(controls.shortcutEvents.count == 3)
+    model.pause()
+    #expect(controls.shortcutEvents.map(\.down) == [true, false, true, false])
+    await model.shutdown()
+}
+
+@Test @MainActor func aHoldsReleaseCanHaveItsOwnAction() async throws {
+    let defaults = MemoryDefaults()
+    defaults.set(true, forKey: "setupCompleted")
+    let connection = RecordedConnection()
+    let controls = RecordingControls()
+    var now = 100.0
+    let model = BandModel(defaults: defaults, connection: connection, controls: controls, clock: { now })
+    model.selectedAddress = "test-band"
+    model.tapMappings[.middleHold] = .playPause
+    model.tapMappings[.middleHoldRelease] = .keyboardShortcut
+    let send = KeyShortcut(keyCode: 36, modifiers: [.command], key: "return")
+    model.setRecordedShortcut(send, for: .tap(.middleHoldRelease))
+    model.connect()
+    connection.send(.connected)
+    connection.send(.heartbeat)
+    connection.send(.handedness(.right))
+    model.toggleControls()
+    func gesture(_ sequence: UInt64, _ action: String, _ derived: String) {
+        connection.send(.gesture(BandGesture(sequence: sequence, timestampUs: sequence, finger: "middle", action: action,
+                                             derivedAction: derived, synthetic: false, receivedAt: now)), at: now)
+    }
+    now = 101
+    gesture(1, "press", "buttonHold")
+    #expect(controls.actions == [.playPause])
+    now = 101.2
+    gesture(2, "release", "buttonHoldRelease")
+    #expect(controls.shortcutEvents.map(\.down) == [true, false])
+    #expect(model.label(of: .keyboardShortcut, for: .tap(.middleHoldRelease)) == "⌘return")
+    await model.shutdown()
 }

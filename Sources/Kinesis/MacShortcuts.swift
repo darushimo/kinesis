@@ -7,6 +7,9 @@ protocol MacControls {
     var trusted: Bool { get }
     func requestAccess()
     func post(_ action: MacAction) throws
+    /// Presses or lets go of a recorded shortcut. A tap is a press and then a release;
+    /// a hold presses at its start and lets go at its end.
+    func press(_ shortcut: KeyShortcut, down: Bool) throws
     /// Where the pointer is now, in global display points with y growing downward.
     var cursorLocation: CGPoint? { get }
     /// The size of the main display in points.
@@ -94,6 +97,58 @@ struct MacShortcuts: MacControls {
         let (down, up) = try Self.events(for: action)
         down.post(tap: .cghidEventTap)
         up.post(tap: .cghidEventTap)
+    }
+
+    func press(_ shortcut: KeyShortcut, down: Bool) throws {
+        guard trusted else { throw KinesisError(message: "Allow Kinesis in Accessibility to use Mac controls.") }
+        for event in try Self.events(for: shortcut, down: down) { event.post(tap: .cghidEventTap) }
+    }
+
+    static func flags(_ modifiers: KeyShortcut.Modifiers) -> CGEventFlags {
+        var flags: CGEventFlags = []
+        if modifiers.contains(.control) { flags.insert(.maskControl) }
+        if modifiers.contains(.option) { flags.insert(.maskAlternate) }
+        if modifiers.contains(.shift) { flags.insert(.maskShift) }
+        if modifiers.contains(.command) { flags.insert(.maskCommand) }
+        if modifiers.contains(.function) { flags.insert(.maskSecondaryFn) }
+        return flags
+    }
+
+    /// The events for pressing a recorded shortcut, or for letting it go. Like fingers on a
+    /// keyboard: modifiers go down one at a time before the key and come up after it, so an
+    /// app that watches modifiers, as a push-to-talk app does, sees them held.
+    static func events(for shortcut: KeyShortcut, down: Bool) throws -> [CGEvent] {
+        guard let source = CGEventSource(stateID: .privateState) else {
+            throw KinesisError(message: "macOS couldn't create the keyboard shortcut")
+        }
+        func key(_ code: UInt16, down: Bool, flags: CGEventFlags, modifierKey: Bool) throws -> CGEvent {
+            guard let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down) else {
+                throw KinesisError(message: "macOS couldn't create the keyboard shortcut")
+            }
+            if modifierKey { event.type = .flagsChanged }
+            event.flags = flags
+            event.setIntegerValueField(.eventSourceUserData, value: shortcutEventTag)
+            return event
+        }
+        let held = KeyShortcut.Modifiers.ordered.filter { shortcut.heldModifiers.contains($0.modifier) }
+        let all = flags(shortcut.modifiers)
+        var events: [CGEvent] = []
+        var current: KeyShortcut.Modifiers = []
+        if down {
+            for modifier in held {
+                current.insert(modifier.modifier)
+                try events.append(key(modifier.keyCode, down: true, flags: flags(current), modifierKey: true))
+            }
+            try events.append(key(shortcut.keyCode, down: true, flags: all, modifierKey: shortcut.isModifierOnly))
+        } else {
+            current = shortcut.heldModifiers
+            try events.append(key(shortcut.keyCode, down: false, flags: flags(current), modifierKey: shortcut.isModifierOnly))
+            for modifier in held.reversed() {
+                current.remove(modifier.modifier)
+                try events.append(key(modifier.keyCode, down: false, flags: flags(current), modifierKey: true))
+            }
+        }
+        return events
     }
 
     static func events(for action: MacAction) throws -> (CGEvent, CGEvent) {
