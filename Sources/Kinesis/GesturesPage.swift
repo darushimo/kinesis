@@ -97,7 +97,7 @@ struct GesturesPage: View {
                 // The keys sit under the gesture, as in System Settings: click, then press them.
                 OpenRow(title: "shortcut",
                         detail: selection == .holdShortcut ? "pressed when the hold starts, let go when you release."
-                                                           : "click, then press the keys. esc cancels, delete clears.") {
+                                                           : "click, hold the modifiers, press the key, then let go. esc cancels, delete clears.") {
                     ShortcutRecorder(shortcut: model.recordedShortcut(for: gesture),
                                      record: { model.setRecordedShortcut($0, for: gesture) },
                                      label: label + " shortcut")

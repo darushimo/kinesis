@@ -3,8 +3,10 @@ import SwiftUI
 import KinesisCore
 
 /// Records a shortcut the way System Settings does: click, then press the keys.
-/// Escape cancels and Delete clears. A modifier pressed and let go on its own, such as
-/// right Option or fn, records just that modifier, for apps that listen for a held key.
+/// It records a chord: hold the modifiers and press the key, in any order, and it saves
+/// once every key is let go. Escape cancels and Delete clears. A modifier pressed and let
+/// go on its own, such as right Option or fn, records just that modifier, for apps that
+/// listen for a held key.
 @MainActor
 final class ShortcutCapture: ObservableObject {
     enum Outcome {
@@ -14,13 +16,17 @@ final class ShortcutCapture: ObservableObject {
     }
 
     @Published private(set) var recording = false
-    /// The modifiers held so far, drawn while recording.
+    /// The keys pressed so far, drawn while recording.
     @Published private(set) var preview = ""
     private var monitor: Any?
     private var finish: ((Outcome) -> Void)?
+    /// Modifiers down right now, and every modifier pressed since recording began.
     private var held: KeyShortcut.Modifiers = []
     private var peak: KeyShortcut.Modifiers = []
     private var lastModifierKey: UInt16?
+    /// The ordinary key in the chord, and the ordinary keys still down.
+    private var mainKey: (code: UInt16, name: String)?
+    private var keysDown: Set<UInt16> = []
     /// Only one recorder listens at a time.
     private static weak var active: ShortcutCapture?
 
@@ -32,9 +38,11 @@ final class ShortcutCapture: ObservableObject {
         held = []
         peak = []
         lastModifierKey = nil
+        mainKey = nil
+        keysDown = []
         preview = ""
         recording = true
-        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged], handler: { [weak self] event in
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged], handler: { [weak self] event in
             guard let self, self.handle(event) else { return event }
             return nil
         })
@@ -45,40 +53,64 @@ final class ShortcutCapture: ObservableObject {
         complete(.cancel)
     }
 
-    /// Returns true when the key press belonged to the recording, so no one else gets it.
+    /// The chord as pressed so far, with fn left off keys that always carry it.
+    private var chord: KeyShortcut.Modifiers {
+        guard let mainKey, KeyShortcut.keysCarryingFunctionFlag.contains(mainKey.code) else { return peak }
+        return peak.subtracting(.function)
+    }
+
+    /// Returns true when the key event belonged to the recording, so no one else gets it.
     private func handle(_ event: NSEvent) -> Bool {
         guard recording else { return false }
         // Keys Kinesis posts for a gesture are not the person typing.
         guard event.cgEvent?.getIntegerValueField(.eventSourceUserData) != MacShortcuts.shortcutEventTag else { return false }
-        let flags = Self.modifiers(event.modifierFlags)
-        if event.type == .flagsChanged {
-            if flags.isEmpty {
-                // Everything let go with no key in between: the modifier is the shortcut.
-                if let key = lastModifierKey {
-                    let name = KeyShortcut.name(forKeyCode: key) ?? "key \(key)"
-                    complete(.record(KeyShortcut(keyCode: key, modifiers: peak, key: name)))
-                }
-            } else {
-                if !flags.subtracting(held).isEmpty, KeyShortcut.modifierKeys[event.keyCode] != nil {
-                    lastModifierKey = event.keyCode
-                }
-                peak.formUnion(flags)
-                preview = KeyShortcut.Modifiers.ordered.filter { flags.contains($0.modifier) }.map(\.symbol).joined()
+        switch event.type {
+        case .flagsChanged:
+            let flags = Self.modifiers(event.modifierFlags)
+            if !flags.subtracting(held).isEmpty, KeyShortcut.modifierKeys[event.keyCode] != nil {
+                lastModifierKey = event.keyCode
             }
+            // Only real modifier presses count, not the fn flag macOS adds to arrows and F-keys.
+            peak.formUnion(flags)
             held = flags
-            return true
+        case .keyDown:
+            guard !event.isARepeat else { return true }
+            let plain = held.isEmpty && keysDown.isEmpty && mainKey == nil
+            if plain && event.keyCode == 53 {
+                complete(.cancel)
+                return true
+            }
+            if plain && (event.keyCode == 51 || event.keyCode == 117) {
+                complete(.clear)
+                return true
+            }
+            keysDown.insert(event.keyCode)
+            mainKey = (event.keyCode, Self.keyName(event))
+        case .keyUp:
+            keysDown.remove(event.keyCode)
+        default:
+            return false
         }
-        guard event.type == .keyDown, !event.isARepeat else { return true }
-        var modifiers = flags
-        if KeyShortcut.keysCarryingFunctionFlag.contains(event.keyCode) { modifiers.remove(.function) }
-        if modifiers.isEmpty && event.keyCode == 53 {
-            complete(.cancel)
-        } else if modifiers.isEmpty && (event.keyCode == 51 || event.keyCode == 117) {
-            complete(.clear)
-        } else {
-            complete(.record(KeyShortcut(keyCode: event.keyCode, modifiers: modifiers, key: Self.keyName(event))))
-        }
+        updatePreview()
+        finishIfReleased()
         return true
+    }
+
+    private func updatePreview() {
+        let symbols = KeyShortcut.Modifiers.ordered.filter { chord.contains($0.modifier) }.map(\.symbol).joined()
+        preview = symbols + (mainKey?.name ?? "")
+    }
+
+    /// Saves the chord once every key in it is up.
+    private func finishIfReleased() {
+        guard recording, held.isEmpty, keysDown.isEmpty else { return }
+        if let mainKey {
+            complete(.record(KeyShortcut(keyCode: mainKey.code, modifiers: chord, key: mainKey.name)))
+        } else if let key = lastModifierKey {
+            // Everything let go with no key in between: the modifier is the shortcut.
+            let name = KeyShortcut.name(forKeyCode: key) ?? "key \(key)"
+            complete(.record(KeyShortcut(keyCode: key, modifiers: peak, key: name)))
+        }
     }
 
     private func complete(_ outcome: Outcome) {
