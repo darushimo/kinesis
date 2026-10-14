@@ -2043,6 +2043,7 @@ final class BandModel: ObservableObject {
             return
         }
         guard let shortcut = recordedShortcut(for: gesture) else {
+            connectionLog.notice("No shortcut recorded for \(gesture.label, privacy: .public)")
             lastAction = "No shortcut recorded for \(gesture.label.lowercased())"
             return
         }
@@ -2052,10 +2053,12 @@ final class BandModel: ObservableObject {
                 try controls.press(shortcut, down: true)
                 heldShortcut = (shortcut, tap.finger)
                 lastAction = "Holding: \(shortcut.display)"
+                connectionLog.notice("Holding shortcut \(shortcut.display, privacy: .public) for \(gesture.label, privacy: .public)")
             } else {
                 try controls.press(shortcut, down: true)
                 try controls.press(shortcut, down: false)
                 lastAction = "Sent: \(shortcut.display)"
+                connectionLog.notice("Sent shortcut \(shortcut.display, privacy: .public) for \(gesture.label, privacy: .public)")
             }
         } catch {
             self.error = error.localizedDescription

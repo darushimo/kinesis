@@ -99,9 +99,26 @@ struct MacShortcuts: MacControls {
         up.post(tap: .cghidEventTap)
     }
 
+    /// When each shortcut went down, so a quick tap is still held for as long as a real one.
+    private static var pressedAt: [KeyShortcut: Double] = [:]
+    /// A real keypress lasts tens of milliseconds, and its keys go down a moment apart. Apps
+    /// that check whether ⌥ is still held when Space arrives, as dictation apps do, miss a
+    /// shortcut whose keys all go down and up in the same instant.
+    static let keyGap: useconds_t = 12_000
+    static let shortestPress = 0.08
+
     func press(_ shortcut: KeyShortcut, down: Bool) throws {
         guard trusted else { throw KinesisError(message: "Allow Kinesis in Accessibility to use Mac controls.") }
-        for event in try Self.events(for: shortcut, down: down) { event.post(tap: .cghidEventTap) }
+        let now = ProcessInfo.processInfo.systemUptime
+        if !down, let pressed = Self.pressedAt.removeValue(forKey: shortcut) {
+            let wait = Self.shortestPress - (now - pressed)
+            if wait > 0 { usleep(useconds_t(wait * 1_000_000)) }
+        }
+        for (index, event) in try Self.events(for: shortcut, down: down).enumerated() {
+            if index > 0 { usleep(Self.keyGap) }
+            event.post(tap: .cghidEventTap)
+        }
+        if down { Self.pressedAt[shortcut] = ProcessInfo.processInfo.systemUptime }
     }
 
     static func flags(_ modifiers: KeyShortcut.Modifiers) -> CGEventFlags {
