@@ -391,6 +391,7 @@ final class BandModel: ObservableObject {
     private var automaticStartPending = false
     private var retries = 0
     private let connectionLog = Logger(subsystem: "local.callbacked.kinesis", category: "connection")
+    private let gestureLog = Logger(subsystem: "local.callbacked.kinesis", category: "gestures")
     private var metricsAt = 0.0
     private var maxDeliveryDelay = 0.0
     private var maxInputGap = 0.0
@@ -1335,6 +1336,9 @@ final class BandModel: ObservableObject {
         case .dataSeen:
             markDataArrived(at: event.receivedAt)
         case .gesture(let message):
+            // Every gesture message as the band sent it, before any filtering, so a new
+            // gesture can be tried out and its events read back.
+            gestureLog.notice("finger=\(message.finger, privacy: .public) action=\(message.action, privacy: .public) derived=\(message.derivedAction, privacy: .public) synthetic=\(message.synthetic, privacy: .public) seq=\(message.sequence, privacy: .public) delay=\(String(format: "%.3f", now - message.receivedAt), privacy: .public)s")
             // Any release of the finger holding a shortcut lets go, even one too late to act on.
             if message.isRelease, !message.synthetic, heldShortcut?.finger == message.finger { releaseHeldShortcut() }
             guard wantsConnection, !sleeping, now - message.receivedAt <= 0.35, now - message.receivedAt >= -0.1 else { return }
