@@ -136,16 +136,18 @@ private func gesture(_ sequence: Int, time: Double = 100, action: String = "left
     #expect(router.gesture(from: gesture(1, action: "tap", finger: "middle"), now: 100) == .tap(.middleTap))
 }
 
-@Test func aMiddleHoldIsAGestureAndAnIndexHoldIsNot() {
+@Test func eitherFingersHeldPinchIsAGesture() {
     var router = GestureRouter()
     func hold(_ finger: String, sequence: UInt64) -> BandGesture {
         BandGesture(sequence: sequence, timestampUs: sequence, finger: finger, action: "press",
                     derivedAction: "buttonHold", synthetic: false, receivedAt: 100)
     }
     #expect(router.gesture(from: hold("middle", sequence: 1), now: 100) == .tap(.middleHold))
-    // Holding the index finger is the dial, so it never fires an action of its own.
-    #expect(router.gesture(from: hold("index", sequence: 2), now: 100) == nil)
-    #expect(TapGesture.middleHold.label == "Middle hold" && TapGesture.middleHold.finger == "middle")
+    // An index pinch is a gesture too. Whether it acts or turns the dial is the app's setting.
+    #expect(router.gesture(from: hold("index", sequence: 2), now: 100) == .tap(.indexHold))
+    #expect(TapGesture.middleHold.label == "Middle pinch" && TapGesture.middleHold.finger == "middle")
+    #expect(TapGesture.indexHold.finger == "index" && TapGesture.hold("index") == .indexHold && TapGesture.holdRelease("middle") == .middleHoldRelease)
+    #expect(TapGesture.allCases.filter(\.isPinch).count == 4)
     #expect(TapGesture.indexDoubleTap.motion == "double tap" && TapGesture.middleTap.motion == "tap")
 }
 
@@ -161,10 +163,10 @@ private func gesture(_ sequence: Int, time: Double = 100, action: String = "left
     #expect(router.gesture(from: message(3, action: "release", derived: "buttonHoldRelease"), now: 100) == .tap(.middleHoldRelease))
     // The same release reported again ends nothing.
     #expect(router.gesture(from: message(4, action: "release", derived: "unknown"), now: 100) == nil)
-    // An index hold is the dial, and has no release of its own.
-    #expect(router.gesture(from: message(5, action: "press", derived: "buttonHold", finger: "index"), now: 100) == nil)
-    #expect(router.gesture(from: message(6, action: "release", derived: "buttonHoldRelease", finger: "index"), now: 100) == nil)
-    #expect(TapGesture.middleHoldRelease.label == "Middle hold release")
+    // The index finger's pinch has a release of its own as well.
+    #expect(router.gesture(from: message(5, action: "press", derived: "buttonHold", finger: "index"), now: 100) == .tap(.indexHold))
+    #expect(router.gesture(from: message(6, action: "release", derived: "buttonHoldRelease", finger: "index"), now: 100) == .tap(.indexHoldRelease))
+    #expect(TapGesture.middleHoldRelease.label == "Middle pinch release")
 }
 
 @Test func recordedShortcutsReadLikeMacMenus() throws {

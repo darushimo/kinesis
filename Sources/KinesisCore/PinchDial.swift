@@ -6,9 +6,12 @@ struct PinchDial {
     static let armDelay = 0.18
 
     private(set) var engaged = false
+    /// The finger whose pinch is turning the dial. Either the index or the middle finger can;
+    /// the app decides which of them is set to turn.
+    private(set) var finger: String?
     private var pressedAt: [String: Double] = [:]
     /// A press can only become a pinch if motion was already flowing when it began.
-    private var indexCanArm = false
+    private var canArm: Set<String> = []
     private var lastGyroAt: Double?
     private var lastDeviceTime: UInt64?
     private var bias = SIMD3<Double>.zero
@@ -20,14 +23,19 @@ struct PinchDial {
             pressedAt.removeAll()
             release()
         }
-        for (finger, time) in pressedAt where now - time >= 10 {
-            pressedAt.removeValue(forKey: finger)
-            if finger == "index" { release() }
+        for (stale, time) in pressedAt where now - time >= 10 {
+            pressedAt.removeValue(forKey: stale)
+            if stale == finger { release() }
         }
-        if !engaged, indexCanArm, let pressed = pressedAt["index"], now - pressed >= Self.armDelay,
-           let lastGyroAt, now - lastGyroAt < 0.35 {
+        // The index finger first, if both are pinched.
+        if !engaged, let lastGyroAt, now - lastGyroAt < 0.35,
+           let armed = ["index", "middle"].first(where: { candidate in
+               guard canArm.contains(candidate), let pressed = pressedAt[candidate] else { return false }
+               return now - pressed >= Self.armDelay
+           }) {
             release()
             engaged = true
+            finger = armed
         }
     }
 
@@ -39,14 +47,12 @@ struct PinchDial {
         let released = gesture.action == "release" || ["buttonRelease", "buttonHoldRelease"].contains(gesture.derivedAction)
         if press, pressedAt[finger] == nil {
             pressedAt[finger] = now
-            if finger == "index" { indexCanArm = lastGyroAt.map { now - $0 < 0.35 } ?? false }
+            if lastGyroAt.map({ now - $0 < 0.35 }) == true { canArm.insert(finger) } else { canArm.remove(finger) }
         }
         if released {
             pressedAt.removeValue(forKey: finger)
-            if finger == "index" {
-                indexCanArm = false
-                release()
-            }
+            canArm.remove(finger)
+            if finger == self.finger { release() }
         }
     }
 
@@ -56,8 +62,8 @@ struct PinchDial {
         lastDeviceTime = timestamp
         lastGyroAt = now
         guard let previous, timestamp > previous, timestamp - previous <= 50_000 else {
-            if engaged {
-                pressedAt.removeValue(forKey: "index")
+            if engaged, let finger {
+                pressedAt.removeValue(forKey: finger)
                 release()
             }
             return nil
@@ -79,6 +85,7 @@ struct PinchDial {
 
     private mutating func release() {
         engaged = false
+        finger = nil
         integral = .zero
         axis = nil
     }

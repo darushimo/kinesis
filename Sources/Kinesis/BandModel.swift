@@ -81,11 +81,21 @@ final class BandModel: ObservableObject {
     private var switchWait: Task<Void, Never>?
     /// Turns handwriting on or off, for a gesture bound to it. Dev builds set it.
     var onToggleHandwriting: (() -> Void)?
-    @Published var tapMappings: [TapGesture: MacAction] = [.indexTap: .none, .indexDoubleTap: .playPause, .middleTap: .none, .middleDoubleTap: .mute, .middleHold: .none, .middleHoldRelease: .none] {
+    @Published var tapMappings: [TapGesture: MacAction] = [.indexTap: .none, .indexDoubleTap: .playPause, .middleTap: .none, .middleDoubleTap: .mute,
+                                                           .indexHold: .none, .indexHoldRelease: .none, .middleHold: .none, .middleHoldRelease: .none] {
         didSet {
             defaults.set(Dictionary(uniqueKeysWithValues: tapMappings.map { ($0.key.rawValue, $0.value.rawValue) }), forKey: "tapMappings")
             // A held shortcut must not outlive the setting that holds it.
-            if tapMappings[.middleHold] != .holdShortcut { releaseHeldShortcut() }
+            if let held = heldShortcut, tapMappings[.hold(held.finger)] != .holdShortcut { releaseHeldShortcut() }
+        }
+    }
+    /// Whether each finger's held pinch acts on its own or turns the dial. The index
+    /// finger turns and the middle finger pinches, unless you change them.
+    @Published var pinchModes: [String: PinchMode] = ["index": .pinchAndTurn, "middle": .pinch] {
+        didSet {
+            defaults.set(pinchModes.mapValues(\.rawValue), forKey: "pinchModes")
+            if let held = heldShortcut, pinchMode(for: held.finger) != .pinch { releaseHeldShortcut() }
+            resetDial()
         }
     }
     /// The shortcuts you recorded, by gesture. A gesture whose action is a recorded
@@ -93,10 +103,10 @@ final class BandModel: ObservableObject {
     @Published var recordedShortcuts: [String: KeyShortcut] = [:] {
         didSet {
             if let data = try? JSONEncoder().encode(recordedShortcuts) { defaults.set(data, forKey: "recordedShortcuts") }
-            if let held = heldShortcut, recordedShortcuts[Self.shortcutKey(.tap(.middleHold))] != held.shortcut { releaseHeldShortcut() }
+            if let held = heldShortcut, recordedShortcuts[Self.shortcutKey(.tap(.hold(held.finger)))] != held.shortcut { releaseHeldShortcut() }
         }
     }
-    /// The shortcut a middle hold is holding down, until the pinch lets go.
+    /// The shortcut a held pinch is holding down, until the pinch lets go.
     private var heldShortcut: (shortcut: KeyShortcut, finger: String)?
     @Published var dialTarget = DialTarget.volume {
         didSet { defaults.set(dialTarget.rawValue, forKey: "dialTarget"); resetDial() }
@@ -104,6 +114,16 @@ final class BandModel: ObservableObject {
     @Published var dialSensitivity = 1.0 {
         didSet { defaults.set(dialSensitivity, forKey: "dialSensitivity"); resetDial() }
     }
+    /// The middle finger's own dial, for when it is set to pinch + turn. The index finger's
+    /// dial is `dialTarget` and `dialSensitivity`.
+    @Published var middleDialTarget = DialTarget.none {
+        didSet { defaults.set(middleDialTarget.rawValue, forKey: "middleDialTarget"); resetDial() }
+    }
+    @Published var middleDialSensitivity = 1.0 {
+        didSet { defaults.set(middleDialSensitivity, forKey: "middleDialSensitivity"); resetDial() }
+    }
+    /// The finger turning the dial now, or that turned it last.
+    @Published private(set) var dialFinger = "index"
     @Published var error: String?
     @Published var developerMode = false {
         didSet {
@@ -535,6 +555,14 @@ final class BandModel: ObservableObject {
         if let saved = defaults.string(forKey: "dialTarget"), let target = DialTarget(rawValue: saved) { dialTarget = target }
         let sensitivity = defaults.double(forKey: "dialSensitivity")
         if (0.5...4).contains(sensitivity) { dialSensitivity = sensitivity }
+        if let saved = defaults.dictionary(forKey: "pinchModes") as? [String: String] {
+            for (finger, value) in saved {
+                if ["index", "middle"].contains(finger), let mode = PinchMode(rawValue: value) { pinchModes[finger] = mode }
+            }
+        }
+        if let saved = defaults.string(forKey: "middleDialTarget"), let target = DialTarget(rawValue: saved) { middleDialTarget = target }
+        let middleSensitivity = defaults.double(forKey: "middleDialSensitivity")
+        if (0.5...4).contains(middleSensitivity) { middleDialSensitivity = middleSensitivity }
         refreshIdentity()
         // Observers don't run during init, so apply what they would have.
         loadPointerReach()
@@ -1351,6 +1379,8 @@ final class BandModel: ObservableObject {
                 }
             }
             guard let gesture = router.gesture(from: message, now: now) else { return }
+            // A finger set to pinch + turn is the dial: its held pinch does nothing else.
+            if case .tap(let tap) = gesture, tap.isPinch, pinchMode(for: tap.finger) == .pinchAndTurn { return }
             // The band keeps recognizing gestures while it runs another model, as its
             // handwriting one, though controls are paused. The gesture bound to handwriting
             // still works then, so writing can end the way it started.
@@ -1374,8 +1404,8 @@ final class BandModel: ObservableObject {
                 action = mappings[direction] ?? .none
             case .tap(let tap):
                 lastDirection = nil
-                // Releasing a wrist turn must not also trigger an index-tap assignment.
-                guard tap.finger != "index" || (now - lastDialAction > 0.6 && now - dialEndedAt > 0.7) else { return }
+                // Releasing a wrist turn must not also trigger a tap on the finger that turned.
+                guard tap.finger != dialFinger || (now - lastDialAction > 0.6 && now - dialEndedAt > 0.7) else { return }
                 action = tapMappings[tap] ?? .none
             }
             lastGesture = gesture.label
@@ -1383,14 +1413,14 @@ final class BandModel: ObservableObject {
             gestureCount += 1
             totalGestureCount += 1
             defaults.set(totalGestureCount, forKey: "totalGestureCount")
-            if case .tap(.middleHoldRelease) = gesture {
+            if case .tap(let tap) = gesture, tap.action == "holdrelease" {
                 // Letting go of a held shortcut always goes through, paused or not.
-                if heldShortcut != nil {
+                if heldShortcut?.finger == tap.finger {
                     releaseHeldShortcut()
                     return
                 }
                 // A release follows its hold closely, so it skips the gate's spacing.
-                guard controlsEnabled, action != .none, tapMappings[.middleHold] != .holdShortcut,
+                guard controlsEnabled, action != .none, tapMappings[.hold(tap.finger)] != .holdShortcut,
                       gate.allowsRelease(eventTime: message.receivedAt, now: now, live: live, trusted: controls.trusted) else {
                     return
                 }
@@ -1405,6 +1435,13 @@ final class BandModel: ObservableObject {
         case .dialState(let engaged):
             guard !airCursorEnabled, pointerCalibration == nil else { return }
             guard live, pendingHand == nil, abs(now - event.receivedAt) <= 0.35, !linkIsLate(at: now) else { resetDial(); return }
+            if engaged {
+                // Either finger's pinch can arm the band's dial. Only a finger set to
+                // pinch + turn turns it; a plain pinch is left to act on its own.
+                let finger = pinchedFinger ?? "index"
+                guard pinchMode(for: finger) == .pinchAndTurn else { return }
+                dialFinger = finger
+            }
             // A pinch that turned has just ended: the release is not a tap.
             if !engaged && dialTurned { dialEndedAt = now }
             dialTurned = false
@@ -1422,14 +1459,15 @@ final class BandModel: ObservableObject {
             let delta = bandHand == .left ? -rotation : rotation
             dialTurned = true
             dialTurns.send(delta)
-            guard controlsEnabled, dialArmed, dialTarget != .none,
+            let target = turnTarget(for: dialFinger)
+            guard controlsEnabled, dialArmed, target != .none,
                   dialGate.allows(eventTime: event.receivedAt, now: now, live: live, trusted: controls.trusted) else { return }
-            let steps = dialRouter.turn(delta: delta, sensitivity: dialSensitivity, now: now)
+            let steps = dialRouter.turn(delta: delta, sensitivity: turnSensitivity(for: dialFinger), now: now)
             guard steps != 0 else { return }
             lastDialAction = now
             lastGesture = steps > 0 ? "Wrist turn +" : "Wrist turn −"
             lastDirection = nil
-            dispatch(dialTarget.action(increasing: steps > 0), count: abs(steps))
+            dispatch(target.action(increasing: steps > 0), count: abs(steps))
         case .orientation(let timestamp, let values):
             guard let aim = ForearmAim(quaternion: values, axis: ForearmAim.forearmAxis(for: bandHand)) else { return }
             let delay = measureLinkDelay(band: timestamp, host: event.receivedAt)
@@ -1933,6 +1971,31 @@ final class BandModel: ObservableObject {
                 connection.stop()
             }
         }
+    }
+
+    func pinchMode(for finger: String) -> PinchMode {
+        pinchModes[finger] ?? (finger == "index" ? .pinchAndTurn : .pinch)
+    }
+
+    func setPinchMode(_ mode: PinchMode, for finger: String) {
+        pinchModes[finger] = mode
+    }
+
+    /// What a finger's pinch + turn controls, and how far a turn goes.
+    func turnTarget(for finger: String) -> DialTarget {
+        finger == "middle" ? middleDialTarget : dialTarget
+    }
+
+    func setTurnTarget(_ target: DialTarget, for finger: String) {
+        if finger == "middle" { middleDialTarget = target } else { dialTarget = target }
+    }
+
+    func turnSensitivity(for finger: String) -> Double {
+        finger == "middle" ? middleDialSensitivity : dialSensitivity
+    }
+
+    func setTurnSensitivity(_ sensitivity: Double, for finger: String) {
+        if finger == "middle" { middleDialSensitivity = sensitivity } else { dialSensitivity = sensitivity }
     }
 
     /// Where a gesture's recorded shortcut is saved.

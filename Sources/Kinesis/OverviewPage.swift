@@ -61,7 +61,7 @@ struct OverviewPage: View {
     private var handHighlight: HandHighlight {
         guard model.live else { return .none }
         if let finger = model.pinchedFinger { return finger == "middle" ? .middle : .index }
-        if model.dialEngaged { return .index }
+        if model.dialEngaged { return model.dialFinger == "middle" ? .middle : .index }
         switch model.recognizedGesture {
         case .swipe: return .index
         case .tap(let tap): return tap.finger == "middle" ? .middle : .index
@@ -77,7 +77,7 @@ private struct GestureCaption: View {
 
     private var words: (before: String, strong: String, after: String) {
         guard model.live else { return ("waiting for your ", "band", "") }
-        if model.dialEngaged { return ("index pinch + ", "turn", "") }
+        if model.dialEngaged { return (model.dialFinger + " pinch + ", "turn", "") }
         switch model.recognizedGesture {
         case .swipe(let direction): return ("thumb ", "swipe", " " + direction.rawValue)
         case .tap(let tap): return (tap.finger + " ", tap.motion, "")
@@ -89,7 +89,8 @@ private struct GestureCaption: View {
         guard model.live else { return nil }
         let mapped: MacAction?
         if model.dialEngaged {
-            return model.dialTarget == .none ? "unassigned" : model.dialTarget.title.lowercased()
+            let target = model.turnTarget(for: model.dialFinger)
+            return target == .none ? "unassigned" : target.title.lowercased()
         }
         guard let gesture = model.recognizedGesture else { return nil }
         switch gesture {
@@ -97,7 +98,7 @@ private struct GestureCaption: View {
         case .tap(let tap): mapped = model.tapMappings[tap]
         }
         let bound = mapped ?? MacAction.none
-        if case .tap(.middleHoldRelease) = gesture, model.tapMappings[.middleHold] == .holdShortcut { return "let go of the shortcut" }
+        if case .tap(let tap) = gesture, tap.action == "holdrelease", model.tapMappings[.hold(tap.finger)] == .holdShortcut { return "let go of the shortcut" }
         return bound == .none ? "unassigned" : model.label(of: bound, for: gesture)
     }
 
@@ -150,18 +151,22 @@ private struct GestureMap: View {
         }
         for tap in TapGesture.allCases {
             let action = model.tapMappings[tap] ?? .none
-            // A hold is deliberate, so it has a row even before it has an action. Single
+            // A finger that turns has no pinch of its own; its dial gets a row below.
+            if tap.isPinch && model.pinchMode(for: tap.finger) == .pinchAndTurn { continue }
+            // A pinch is deliberate, so it has a row even before it has an action. Single
             // taps happen by accident, so they stay out until you give them one.
-            guard action != .none || tap == .middleHold else { continue }
-            // While the hold holds a shortcut, its release only lets go.
-            if tap == .middleHoldRelease && model.tapMappings[.middleHold] == .holdShortcut { continue }
+            guard action != .none || tap.action == "hold" else { continue }
+            // While the pinch holds a shortcut, its release only lets go.
+            if tap.action == "holdrelease" && model.tapMappings[.hold(tap.finger)] == .holdShortcut { continue }
             rows.append(Entry(id: tap.rawValue, symbol: tap.symbol, gesture: tap.label.lowercased(),
                               action: action == .none ? "unassigned" : model.label(of: action, for: .tap(tap)),
                               assigned: action != .none, fired: .tap(tap)))
         }
-        if model.dialTarget != .none {
-            rows.append(Entry(id: "dial", symbol: "dial.low", gesture: "pinch + turn",
-                              action: model.dialTarget.title.lowercased(), held: model.dialEngaged && model.live))
+        for finger in ["index", "middle"] where model.pinchMode(for: finger) == .pinchAndTurn {
+            let target = model.turnTarget(for: finger)
+            guard target != .none else { continue }
+            rows.append(Entry(id: "dial." + finger, symbol: "dial.low", gesture: finger + " pinch + turn",
+                              action: target.title.lowercased(), held: model.dialEngaged && model.live && model.dialFinger == finger))
         }
         return rows
     }

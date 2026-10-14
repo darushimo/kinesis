@@ -2194,3 +2194,53 @@ private struct FakePairClient: BandPairClient {
     #expect(model.label(of: .keyboardShortcut, for: .tap(.middleHoldRelease)) == "⌘return")
     await model.shutdown()
 }
+
+@Test @MainActor func eachFingerPinchesOrTurnsAsItIsSet() async throws {
+    let defaults = MemoryDefaults()
+    defaults.set(true, forKey: "setupCompleted")
+    let connection = RecordedConnection()
+    let controls = RecordingControls()
+    var now = 100.0
+    let model = BandModel(defaults: defaults, connection: connection, controls: controls, clock: { now })
+    model.selectedAddress = "test-band"
+    // Out of the box the index finger turns and the middle finger pinches.
+    #expect(model.pinchMode(for: "index") == .pinchAndTurn && model.pinchMode(for: "middle") == .pinch)
+    model.tapMappings[.indexHold] = .playPause
+    model.connect()
+    connection.send(.connected)
+    connection.send(.heartbeat)
+    connection.send(.handedness(.right))
+    model.toggleControls()
+    func pinch(_ sequence: UInt64, _ finger: String, _ action: String, _ derived: String) {
+        connection.send(.gesture(BandGesture(sequence: sequence, timestampUs: sequence, finger: finger, action: action,
+                                             derivedAction: derived, synthetic: false, receivedAt: now)), at: now)
+    }
+    // While the index finger turns, its pinch is the dial and its action never fires.
+    now = 101
+    pinch(1, "index", "press", "buttonHold")
+    now = 101.2
+    pinch(2, "index", "release", "buttonHoldRelease")
+    #expect(controls.actions.isEmpty)
+    // Set to pinch, it acts, and its dial stays still.
+    model.setPinchMode(.pinch, for: "index")
+    now = 102
+    pinch(3, "index", "press", "buttonPress")
+    connection.send(.dialState(true), at: now)
+    #expect(!model.dialEngaged)
+    now = 102.5
+    pinch(4, "index", "press", "buttonHold")
+    #expect(controls.actions == [.playPause])
+    now = 102.7
+    pinch(5, "index", "release", "buttonHoldRelease")
+    connection.send(.dialState(false), at: now)
+
+    // The middle finger set to pinch + turn drives its own dial target.
+    model.setPinchMode(.pinchAndTurn, for: "middle")
+    model.setTurnTarget(.brightness, for: "middle")
+    now = 104
+    pinch(6, "middle", "press", "buttonPress")
+    connection.send(.dialState(true), at: now)
+    #expect(model.dialEngaged && model.dialFinger == "middle")
+    #expect(model.turnTarget(for: "middle") == .brightness && model.turnTarget(for: "index") == .volume)
+    await model.shutdown()
+}

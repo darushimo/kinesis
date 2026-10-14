@@ -171,28 +171,42 @@ public enum RecognizedGesture: Hashable, Sendable {
 }
 
 public enum TapGesture: String, CaseIterable, Identifiable, Sendable {
-    // An index hold is the dial, so only the middle finger has a hold of its own.
-    // Its release, after a hold, can have an action too.
-    case indexTap, indexDoubleTap, middleTap, middleDoubleTap, middleHold, middleHoldRelease
+    // A held pinch, and its release, are the "pinch" gestures. Each finger is set to either
+    // pinch or pinch + turn: a finger that turns is the dial, and its pinches do nothing else.
+    case indexTap, indexDoubleTap, middleTap, middleDoubleTap, indexHold, indexHoldRelease, middleHold, middleHoldRelease
     public var id: String { rawValue }
-    public var finger: String { self == .indexTap || self == .indexDoubleTap ? "index" : "middle" }
+    public var finger: String { [.indexTap, .indexDoubleTap, .indexHold, .indexHoldRelease].contains(self) ? "index" : "middle" }
     public var action: String {
         switch self {
         case .indexTap, .middleTap: "tap"
         case .indexDoubleTap, .middleDoubleTap: "doubletap"
-        case .middleHold: "hold"
-        case .middleHoldRelease: "holdrelease"
+        case .indexHold, .middleHold: "hold"
+        case .indexHoldRelease, .middleHoldRelease: "holdrelease"
         }
     }
-    /// The motion in plain words: tap, double tap, hold, or hold release.
+    /// A held pinch or its release, as opposed to a tap.
+    public var isPinch: Bool { action == "hold" || action == "holdrelease" }
+    /// The held pinch on a finger.
+    public static func hold(_ finger: String) -> TapGesture { finger == "index" ? .indexHold : .middleHold }
+    /// The release of the held pinch on a finger.
+    public static func holdRelease(_ finger: String) -> TapGesture { finger == "index" ? .indexHoldRelease : .middleHoldRelease }
+    /// The motion in plain words: tap, double tap, pinch, or pinch release.
     public var motion: String {
         switch action {
         case "doubletap": "double tap"
-        case "holdrelease": "hold release"
+        case "hold": "pinch"
+        case "holdrelease": "pinch release"
         default: action
         }
     }
     public var label: String { "\(finger.capitalized) \(motion)" }
+}
+
+/// What a finger's held pinch does: act on its own, or turn the dial as the wrist turns.
+public enum PinchMode: String, CaseIterable, Identifiable, Sendable {
+    case pinch, pinchAndTurn
+    public var id: String { rawValue }
+    public var title: String { self == .pinch ? "pinch" : "pinch + turn" }
 }
 
 public enum DialTarget: String, CaseIterable, Identifiable, Sendable {
