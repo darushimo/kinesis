@@ -144,6 +144,8 @@ final class ShortcutCapture: ObservableObject {
                 ?? CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
                                      eventsOfInterest: mask, callback: recorderTapCallback, userInfo: nil) else {
             Self.log.notice("Shortcut recorder: no event tap, listening to Kinesis's own window only")
+            // Listening to every key needs Input Monitoring. Ask, so the next recording can.
+            _ = CGRequestListenEventAccess()
             return
         }
         Self.log.notice("Shortcut recorder: listening through an event tap")
@@ -256,13 +258,83 @@ final class ShortcutCapture: ObservableObject {
     }
 }
 
-/// A pill that shows a recorded shortcut. Click it and press keys to record a new one.
+/// A key you can pick from a list, for building a shortcut by clicking instead of typing.
+struct ShortcutKeyChoice: Hashable, Sendable {
+    let code: UInt16
+    let name: String
+
+    static let all: [ShortcutKeyChoice] = {
+        let named: [UInt16] = [49, 36, 48, 53, 51, 123, 124, 125, 126,
+                               122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111]
+        let letters: [(String, UInt16)] = [("A", 0), ("B", 11), ("C", 8), ("D", 2), ("E", 14), ("F", 3), ("G", 5), ("H", 4),
+                                           ("I", 34), ("J", 38), ("K", 40), ("L", 37), ("M", 46), ("N", 45), ("O", 31),
+                                           ("P", 35), ("Q", 12), ("R", 15), ("S", 1), ("T", 17), ("U", 32), ("V", 9),
+                                           ("W", 13), ("X", 7), ("Y", 16), ("Z", 6)]
+        let digits: [(String, UInt16)] = [("0", 29), ("1", 18), ("2", 19), ("3", 20), ("4", 21), ("5", 23), ("6", 22),
+                                          ("7", 26), ("8", 28), ("9", 25)]
+        return named.map { ShortcutKeyChoice(code: $0, name: KeyShortcut.name(forKeyCode: $0) ?? "key \($0)") }
+            + (letters + digits).map { ShortcutKeyChoice(code: $0.1, name: $0.0) }
+    }()
+}
+
+/// Builds a shortcut from clicks: the modifiers, then the key. Nothing has to be typed, so a
+/// shortcut another app keeps for itself can still be chosen.
+struct ShortcutEditor: View {
+    let save: (KeyShortcut) -> Void
+    @State private var modifiers: KeyShortcut.Modifiers
+    @State private var key: ShortcutKeyChoice
+
+    init(shortcut: KeyShortcut?, save: @escaping (KeyShortcut) -> Void) {
+        self.save = save
+        let existing = shortcut.flatMap { current in ShortcutKeyChoice.all.first { $0.code == current.keyCode } }
+        _modifiers = State(initialValue: existing == nil ? [.option] : shortcut?.heldModifiers ?? [.option])
+        _key = State(initialValue: existing ?? ShortcutKeyChoice.all[0])
+    }
+
+    private var result: KeyShortcut { KeyShortcut(keyCode: key.code, modifiers: modifiers, key: key.name) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("pick the keys").font(KinesisType.label)
+            HStack(spacing: 6) {
+                ForEach(KeyShortcut.Modifiers.ordered.indices, id: \.self) { index in
+                    let entry = KeyShortcut.Modifiers.ordered[index]
+                    let on = modifiers.contains(entry.modifier)
+                    Button {
+                        modifiers.formSymmetricDifference(entry.modifier)
+                    } label: {
+                        Text(entry.symbol).font(KinesisType.label)
+                            .foregroundStyle(on ? KinesisStyle.accent : KinesisStyle.secondary)
+                            .frame(minWidth: 22).padding(.horizontal, 9).padding(.vertical, 7)
+                            .background(PillSurface(fill: on ? KinesisStyle.chip : KinesisStyle.tray, raised: on))
+                            .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(on ? .isSelected : [])
+                }
+            }
+            PillMenu(options: ShortcutKeyChoice.all.map { Choice($0, $0.name) }, selection: key,
+                     select: { key = $0 }, label: "Key")
+            HStack {
+                Text(result.display).font(KinesisType.headline)
+                Spacer()
+                Button("save") { save(result) }.buttonStyle(KinesisButtonStyle(prominent: true))
+            }
+        }
+        .padding(18)
+        .frame(width: 280)
+    }
+}
+
+/// A pill that shows a recorded shortcut. Click it and press keys to record a new one, or
+/// use the button beside it to pick the keys from a list.
 struct ShortcutRecorder: View {
     let shortcut: KeyShortcut?
     let record: (KeyShortcut?) -> Void
     var label = ""
     @StateObject private var capture = ShortcutCapture()
     @State private var hovered = false
+    @State private var picking = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var text: String {
@@ -271,40 +343,62 @@ struct ShortcutRecorder: View {
     }
 
     var body: some View {
-        Button {
-            if capture.recording {
-                capture.cancel()
-            } else {
-                capture.start { outcome in
-                    switch outcome {
-                    case .record(let recorded): record(recorded)
-                    case .clear: record(nil)
-                    case .cancel: break
+        HStack(spacing: 6) {
+            Button {
+                if capture.recording {
+                    capture.cancel()
+                } else {
+                    capture.start { outcome in
+                        switch outcome {
+                        case .record(let recorded): record(recorded)
+                        case .clear: record(nil)
+                        case .cancel: break
+                        }
                     }
                 }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "keyboard").font(.system(size: 11))
+                        .foregroundStyle(capture.recording ? KinesisStyle.accent : KinesisStyle.secondary)
+                    Text(text).font(KinesisType.label).lineLimit(1)
+                        .foregroundStyle(capture.recording || shortcut == nil ? KinesisStyle.secondary : KinesisStyle.ink)
+                }
+                .padding(.horizontal, 14).padding(.vertical, 8)
+                .background(PillSurface(fill: capture.recording ? KinesisStyle.chip : hovered ? KinesisStyle.trayHover : KinesisStyle.tray,
+                                        raised: capture.recording || hovered))
+                .overlay {
+                    if capture.recording { Capsule().strokeBorder(KinesisStyle.accent, lineWidth: 1.5) }
+                }
+                .contentShape(Capsule())
             }
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "keyboard").font(.system(size: 11))
-                    .foregroundStyle(capture.recording ? KinesisStyle.accent : KinesisStyle.secondary)
-                Text(text).font(KinesisType.label).lineLimit(1)
-                    .foregroundStyle(capture.recording || shortcut == nil ? KinesisStyle.secondary : KinesisStyle.ink)
+            .buttonStyle(.plain).fixedSize()
+            .onHover { hovered = $0 }
+            .animation(reduceMotion ? nil : KinesisMotion.settle, value: capture.recording)
+            .accessibilityLabel(label)
+            .accessibilityValue(capture.recording ? "recording" : shortcut?.display ?? "none")
+            .accessibilityHint("Activate, then press the keys. Escape cancels, Delete clears.")
+
+            Button {
+                capture.cancel()
+                picking = true
+            } label: {
+                Image(systemName: "slider.horizontal.3").font(.system(size: 11))
+                    .foregroundStyle(KinesisStyle.secondary)
+                    .padding(9)
+                    .background(PillSurface(fill: KinesisStyle.tray))
+                    .contentShape(Capsule())
             }
-            .padding(.horizontal, 14).padding(.vertical, 8)
-            .background(PillSurface(fill: capture.recording ? KinesisStyle.chip : hovered ? KinesisStyle.trayHover : KinesisStyle.tray,
-                                    raised: capture.recording || hovered))
-            .overlay {
-                if capture.recording { Capsule().strokeBorder(KinesisStyle.accent, lineWidth: 1.5) }
+            .buttonStyle(.plain)
+            .help("pick the keys instead of typing them")
+            .accessibilityLabel(label + ", pick the keys")
+            .popover(isPresented: $picking, arrowEdge: .bottom) {
+                ShortcutEditor(shortcut: shortcut) { picked in
+                    record(picked)
+                    picking = false
+                }
             }
-            .contentShape(Capsule())
         }
-        .buttonStyle(.plain).fixedSize()
-        .onHover { hovered = $0 }
         .onDisappear { capture.cancel() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in capture.cancel() }
-        .animation(reduceMotion ? nil : KinesisMotion.settle, value: capture.recording)
-        .accessibilityLabel(label)
-        .accessibilityValue(capture.recording ? "recording" : shortcut?.display ?? "none")
-        .accessibilityHint("Activate, then press the keys. Escape cancels, Delete clears.")
     }
 }
