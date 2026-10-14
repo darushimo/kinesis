@@ -24,7 +24,7 @@ protocol MacControls {
 
 @MainActor
 struct MacShortcuts: MacControls {
-    static let shortcutEventTag: Int64 = 0x4B494E45534953
+    nonisolated static let shortcutEventTag: Int64 = 0x4B494E45534953
     var trusted: Bool { CGPreflightPostEventAccess() }
 
     func requestAccess() {
