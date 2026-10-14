@@ -114,38 +114,65 @@ struct MacShortcuts: MacControls {
         return flags
     }
 
+    /// The bits a real keyboard adds to say which physical modifier key is down, left or
+    /// right. Some shortcut handlers check them, so posted keys carry them too.
+    static func deviceFlags(_ keyCode: UInt16) -> UInt64 {
+        switch keyCode {
+        case 59: 0x1 // left control
+        case 56: 0x2 // left shift
+        case 60: 0x4 // right shift
+        case 55: 0x8 // left command
+        case 54: 0x10 // right command
+        case 58: 0x20 // left option
+        case 61: 0x40 // right option
+        case 62: 0x2000 // right control
+        default: 0
+        }
+    }
+
     /// The events for pressing a recorded shortcut, or for letting it go. Like fingers on a
     /// keyboard: modifiers go down one at a time before the key and come up after it, so an
     /// app that watches modifiers, as a push-to-talk app does, sees them held.
     static func events(for shortcut: KeyShortcut, down: Bool) throws -> [CGEvent] {
-        guard let source = CGEventSource(stateID: .privateState) else {
+        // The system's own keyboard state, as a real keyboard updates it. A private source
+        // would keep the modifiers to itself, and global shortcuts such as ⌥Space, which
+        // check what the keyboard is holding, would never see them.
+        guard let source = CGEventSource(stateID: .hidSystemState) else {
             throw KinesisError(message: "macOS couldn't create the keyboard shortcut")
         }
-        func key(_ code: UInt16, down: Bool, flags: CGEventFlags, modifierKey: Bool) throws -> CGEvent {
+        /// The modifier keys down while an event is posted, as key codes.
+        func flags(_ keys: [UInt16]) -> CGEventFlags {
+            var mask = Self.flags(KeyShortcut.Modifiers(keys.compactMap { KeyShortcut.modifierKeys[$0] }))
+            // Marks the event as typed, not coalesced, as a real keyboard's are.
+            mask.insert(CGEventFlags(rawValue: 0x100))
+            for key in keys { mask.insert(CGEventFlags(rawValue: deviceFlags(key))) }
+            return mask
+        }
+        func key(_ code: UInt16, down: Bool, holding keys: [UInt16], modifierKey: Bool) throws -> CGEvent {
             guard let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down) else {
                 throw KinesisError(message: "macOS couldn't create the keyboard shortcut")
             }
             if modifierKey { event.type = .flagsChanged }
-            event.flags = flags
+            event.flags = flags(keys)
             event.setIntegerValueField(.eventSourceUserData, value: shortcutEventTag)
             return event
         }
-        let held = KeyShortcut.Modifiers.ordered.filter { shortcut.heldModifiers.contains($0.modifier) }
-        let all = flags(shortcut.modifiers)
+        let modifierCodes = KeyShortcut.Modifiers.ordered.filter { shortcut.heldModifiers.contains($0.modifier) }.map(\.keyCode)
         var events: [CGEvent] = []
-        var current: KeyShortcut.Modifiers = []
+        var keys: [UInt16] = []
         if down {
-            for modifier in held {
-                current.insert(modifier.modifier)
-                try events.append(key(modifier.keyCode, down: true, flags: flags(current), modifierKey: true))
+            for code in modifierCodes {
+                keys.append(code)
+                try events.append(key(code, down: true, holding: keys, modifierKey: true))
             }
-            try events.append(key(shortcut.keyCode, down: true, flags: all, modifierKey: shortcut.isModifierOnly))
+            if shortcut.isModifierOnly { keys.append(shortcut.keyCode) }
+            try events.append(key(shortcut.keyCode, down: true, holding: keys, modifierKey: shortcut.isModifierOnly))
         } else {
-            current = shortcut.heldModifiers
-            try events.append(key(shortcut.keyCode, down: false, flags: flags(current), modifierKey: shortcut.isModifierOnly))
-            for modifier in held.reversed() {
-                current.remove(modifier.modifier)
-                try events.append(key(modifier.keyCode, down: false, flags: flags(current), modifierKey: true))
+            keys = modifierCodes
+            try events.append(key(shortcut.keyCode, down: false, holding: keys, modifierKey: shortcut.isModifierOnly))
+            for code in modifierCodes.reversed() {
+                keys.removeAll { $0 == code }
+                try events.append(key(code, down: false, holding: keys, modifierKey: true))
             }
         }
         return events
